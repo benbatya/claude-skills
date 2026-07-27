@@ -220,12 +220,27 @@ deep is caught while the tree is still untouched.
    default here, and for a multi-branch stack it is strongly preferred — see the
    squash warning in Options.
 
+   **`--delete-branch` does more than its name suggests**: `gh` deletes the remote
+   branch, then — because you are standing on the branch it just deleted — **checks
+   out the default branch, fast-forwards it, and deletes the local branch too**. So
+   after 8c you are typically on `main` already, with that branch gone locally. Do
+   not be surprised by it, and do not re-do that work below.
+
    **8d — Advance local `main`** so the next branch's mergeability and diff are
-   computed against what actually landed. This refspec form fast-forwards `main`
-   without checking it out, so the working tree is untouched:
+   computed against what actually landed. Which command works depends on where 8c
+   left you, so check first:
    ```bash
-   git fetch origin main:main
+   git rev-parse --abbrev-ref HEAD
    ```
+   - **On `main`** (the usual case after `--delete-branch`) → `git pull --ff-only origin main`.
+     It is often already up to date, since `gh` pulled during its cleanup.
+   - **Not on `main`** → `git fetch origin main:main`. This refspec form fast-forwards
+     `main` without checking it out, so the working tree is untouched.
+
+   Do **not** use the refspec form unconditionally: `git fetch origin main:main`
+   fails outright with *"refusing to fetch into branch 'refs/heads/main' checked out
+   at ..."* when `main` is the current branch, which would abort the loop after the
+   first branch of a stack lands.
 
    **If a merge fails part-way through the stack**, stop immediately and report
    precisely which branches landed, which did not, and that the remainder now sits on
@@ -233,13 +248,17 @@ deep is caught while the tree is still untouched.
    to continue past a failure — every branch above it is now built on a base that no
    longer matches.
 
-9. **Return to a clean state.**
+9. **Return to a clean state.** Much of this may already be done — `gh pr merge
+   --delete-branch` leaves you on `main` with the merged branch deleted locally and
+   remotely (see 8c). Verify rather than assume, and skip what is already true:
    ```bash
-   git checkout main
-   git pull --ff-only origin main
+   git rev-parse --abbrev-ref HEAD          # already main?
+   git for-each-ref --format='%(refname:short)' refs/heads
+   git checkout main                        # only if not already there
+   git pull --ff-only origin main           # no-op if gh already pulled
    ```
-   Then delete each landed branch locally with the **safe** delete, which refuses if
-   the commits are not actually reachable from `main`:
+   Then delete any landed branch that still exists locally, with the **safe** delete,
+   which refuses if the commits are not actually reachable from `main`:
    ```bash
    git branch -d <B>
    ```
