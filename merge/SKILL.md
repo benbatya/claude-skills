@@ -1,13 +1,13 @@
 ---
 name: merge
-description: Land the current branch — or a whole stack of branches, bottom-up. Verify every branch is pushed and in sync with origin and that the local stack matches the upstream stack, find or create each branch's GitHub PR, run the repo's validation/acceptance checks plus each PR's CI, then merge bottom-up, retargeting each PR as its parent lands. Use when the user says "/merge", "merge this branch", "land this PR", "merge the stack", or "ship it".
+description: Land the current branch — or a whole stack of branches, bottom-up. Verify every branch is pushed and in sync with origin and that the local stack matches the upstream stack, find or create each branch's GitHub PR, verify each branch already has a plans/<branch>.md recording its changes and decisions (written by /change and /push, never by this skill), run the repo's validation/acceptance checks plus each PR's CI, then squash-merge bottom-up (one commit per PR on main), retargeting each PR as its parent lands. Use when the user says "/merge", "merge this branch", "land this PR", "merge the stack", or "ship it".
 ---
 
 # Merge the current branch, or a stack, via GitHub PRs
 
 Take the checked-out branch from "work is done" to "landed on `main`": confirm the
-remote has the work, get a PR for it, prove the change is good (local checks **and**
-the PR's CI), then merge and tidy up.
+remote has the work, get a PR for it, prove the change is good (a plan file, the
+repo's own checks, **and** the PR's CI), then merge and tidy up.
 
 If the branch is part of a **stack** (a chain of local branches each built on the one
 below it), all of that applies to **every branch in the stack**, bottom-up: each one
@@ -149,14 +149,47 @@ deep is caught while the tree is still untouched.
      `🤖 Generated with [Claude Code]` line). If the repo has a PR template, fill it
      in rather than ignoring it.
 
-7. **Validate the whole stack — this is the gate.** Two independent sources per
-   branch, and **both** must be clean for **every** branch before *any* branch
-   merges. Validating up front costs a few checkouts and buys the guarantee that the
-   skill never lands half a stack because the top branch was broken.
+7. **Validate the whole stack — this is the gate.** Three checks per branch, and
+   **all** must be clean for **every** branch before *any* branch merges. Validating
+   up front costs a few checkouts and buys the guarantee that the skill never lands
+   half a stack because the top branch was broken.
 
    For each branch `B` in the stack, bottom-up: `git checkout <B>`, then:
 
-   **7a — Local checks.** Discover what this repo actually runs; do not assume. Look
+   **7a — Plan file must already exist.** Every branch must land a `plans/<B>.md`
+   describing what it changed and why. `main` then carries a durable record of each
+   change's reasoning, which matters here because the default squash (8c) collapses
+   the branch's commit messages into one and the branch itself is deleted.
+
+   **This step verifies; it never writes.** Authoring the file belongs to `/change`
+   (which seeds it) and `/push` (which keeps it current) — both of which run while
+   the work is being done and the reasoning is still at hand. Writing it here would
+   also mean committing and pushing mid-merge, moving the head that 7b, 7c and
+   step 8 validate, so the skill would verify one commit and merge another.
+
+   Run it first in the per-branch sequence: it is the cheapest check, so a branch
+   that fails it fails before any time is spent on builds or CI.
+   ```bash
+   git cat-file -e <B>:plans/<B>.md      # exists in the branch, not just on disk
+   git log --oneline main..<B>           # or <parent>..<B> for a stacked branch
+   ```
+   Query the branch (`<B>:plans/<B>.md`), not the working tree: the file has to be
+   *committed* to land with the merge. An uncommitted file on disk would pass an
+   `ls` and then not exist in `main`.
+
+   - **Missing** → **stop and report.** Name the branch and the exact path expected,
+     and tell the user to run `/push`, which writes the file from the branch's
+     history and commits it. Do not write it here, and do not merge without it.
+   - **Present** → read it and confirm it describes *this* branch's changes. A plan
+     seeded at `/change` time often states an intent the branch outgrew. If it
+     contradicts what the commits actually did, **stop and report** the mismatch and
+     hand off to `/push` — a stale plan is worse than none, because it will be read
+     as current.
+
+   A branch name containing `/` nests a directory under `plans/` (`feature/x` →
+   `plans/feature/x.md`), so the path is always derivable from the branch name.
+
+   **7b — Local checks.** Discover what this repo actually runs; do not assume. Look
    at `CLAUDE.md`/`AGENTS.md` (they often name the exact commands), then
    `package.json` `scripts`, then a `Makefile`, `justfile`, `pyproject.toml`,
    `Cargo.toml`, etc. Run the validation-shaped ones — typically typecheck, lint,
@@ -169,7 +202,7 @@ deep is caught while the tree is still untouched.
    output, and do not merge anything. If the repo has no discoverable checks at all,
    say so explicitly in the final report rather than implying the stack was validated.
 
-   **7b — PR checks (CI).** Wait for that branch's PR checks to finish:
+   **7c — PR checks (CI).** Wait for that branch's PR checks to finish:
    ```bash
    gh pr checks <number> --watch --fail-fast
    ```
@@ -178,7 +211,7 @@ deep is caught while the tree is still untouched.
      merge over a failing check and never bypass it with `--admin`.
    - **No checks configured** → `gh pr checks` exits non-zero with "no checks reported
      on the ... branch". That is *not* a failure; note in the report that the PR runs
-     no CI, so 7a was the only validation.
+     no CI, so 7a and 7b were the only validation.
    - Long-running CI: keep waiting rather than polling in a tight loop. If it is still
      running after a long stretch, report the in-progress state and let the user
      decide — do not merge a PR whose checks have not settled.
@@ -197,11 +230,18 @@ deep is caught while the tree is still untouched.
    gh pr edit <number> --base main
    ```
 
-   **8b — Confirm mergeability.** GitHub recomputes this after a retarget, so re-read
-   it rather than trusting the value from step 6:
+   **8b — Confirm mergeability and head.** GitHub recomputes mergeability after a
+   retarget, so the value captured in step 6 is stale. Re-read it, and re-confirm
+   the head while you are there — this is the last checkpoint before an
+   irreversible action, and it costs one call to be sure the commit about to land
+   is the one that was validated:
    ```bash
-   gh pr view <number> --json mergeable,mergeStateStatus
+   gh pr view <number> --json mergeable,mergeStateStatus,headRefOid
+   git rev-parse <B>
    ```
+   `headRefOid` must equal the local branch tip. If it does not, the branch moved
+   after validation — **stop and report** rather than merging a commit that was
+   never checked.
    - `mergeable: CONFLICTING` (or `mergeStateStatus: DIRTY`) → conflicts with the
      base. **Stop and report**; tell the user to `/rebase`. Never resolve conflicts as
      part of a merge action.
@@ -214,11 +254,16 @@ deep is caught while the tree is still untouched.
 
    **8c — Merge.**
    ```bash
-   gh pr merge <number> --merge --delete-branch
+   gh pr merge <number> --squash --delete-branch
    ```
-   Use the merge method the repo's history shows (see Options); `--merge` is the
-   default here, and for a multi-branch stack it is strongly preferred — see the
-   squash warning in Options.
+   Squash is the default: `main` gets one commit per PR, and the branch's own
+   commits stay out of its history. They are not lost — GitHub keeps them on the
+   PR at `refs/pull/<number>/head` even after the branch is deleted, retrievable
+   with `git fetch origin refs/pull/<number>/head`. The deleted *branch* does not
+   hold them; the PR does.
+
+   See Options for `merge`/`rebase`, and for why a stack of more than one branch
+   cannot be squashed in a loop.
 
    **`--delete-branch` does more than its name suggests**: `gh` deletes the remote
    branch, then — because you are standing on the branch it just deleted — **checks
@@ -262,9 +307,22 @@ deep is caught while the tree is still untouched.
    ```bash
    git branch -d <B>
    ```
-   If `git branch -d` refuses, leave that branch alone and say so — never `-D`. (A
-   squash or rebase merge rewrites the commits, so `-d` may legitimately refuse;
-   report it as expected in that case rather than forcing.)
+   **Under the default squash merge this refusal is the normal case, not an error.**
+   Squashing replaces the branch's commits with one new commit, so the originals are
+   never reachable from `main` and `-d` cannot see the work as merged. Falling back
+   to `-D` on a hunch would be exactly the unsafe habit `-d` exists to prevent, so
+   gate it on the authoritative signal — GitHub's own view of the PR:
+   ```bash
+   gh pr view <number> --json state --jq .state    # must print MERGED
+   ```
+   Only when that prints `MERGED` is `git branch -D <B>` justified: the server has
+   confirmed the work landed, and the local ref is a leftover pointing at commits
+   that were deliberately rewritten. If it prints anything else, or the PR cannot
+   be resolved, **leave the branch and report it** — never force on a guess.
+
+   Do not use patch-based heuristics (`git cherry`, comparing diffs) to decide this.
+   They are unreliable after a squash, which collapses many commits into one, and
+   wrong here means deleting unmerged work.
 
    If any branch in the stack did **not** land, or there are branches above `CUR`,
    end on the lowest surviving branch instead of `main` so the user is positioned to
@@ -282,23 +340,31 @@ deep is caught while the tree is still untouched.
 
 The text after `/merge` selects the merge method and adjusts scope:
 
-- `squash` → `gh pr merge --squash` · `rebase` → `gh pr merge --rebase` ·
-  default (or `merge`) → `gh pr merge --merge`.
+- default (or `squash`) → `gh pr merge --squash` · `merge` → `gh pr merge --merge` ·
+  `rebase` → `gh pr merge --rebase`.
 
-  **For a stack of more than one branch, squash and rebase are not safe to loop.**
-  Both rewrite the branch's commits, so what lands on `main` is a *different* commit
-  from the one the next branch is built on. The next PR's diff then re-contains its
-  parent's changes and will usually conflict. If the user asks for either on a
-  multi-branch stack: say so, merge **only the bottom-most** branch, then stop and
-  tell them to `/rebase` the remainder onto the new `main` and re-run `/merge`. A
-  merge commit (`--merge`) puts the parent's exact commits on `main`, which is why it
-  is the default and the only method that loops cleanly.
+  Squash is the default: `main` carries one commit per PR rather than every
+  work-in-progress commit from the branch. The originals remain on the PR at
+  `refs/pull/<number>/head` after the branch is deleted, so nothing is lost.
+
+  **A stack of more than one branch cannot be squashed in a loop.** Squash and
+  rebase both rewrite commits, so what lands on `main` is a *different* commit from
+  the one the next branch is built on. The next PR, retargeted to `main`, then
+  re-contains its parent's changes and will usually conflict. So for a multi-branch
+  stack under the default: merge **only the bottom-most** branch, then stop and tell
+  the user to `/rebase` the remainder onto the new `main` and re-run `/merge` —
+  landing an N-branch stack takes N rounds.
+
+  `/merge merge` is the escape hatch when a stack should land in one pass: a merge
+  commit puts the parent's exact commits on `main`, so the branches above stay
+  valid and the loop runs straight through. Offer it explicitly when the stack is
+  more than one branch deep, rather than silently committing the user to N rounds.
 - `all` → also land the branches **above** `CUR`, extending the stack upward in
   ancestry order. Only use this when the user explicitly asks for it; the default
   deliberately stops at `CUR`.
-- `no-verify` / `skip-checks` → skip **7a** (local checks) only, on every branch. CI
-  in 7b is still required and is still a hard gate. Call this out prominently in the
-  report.
+- `no-verify` / `skip-checks` → skip **7b** (local checks) only, on every branch. The
+  plan file in 7a and CI in 7c remain required, and remain hard gates. Call the skip
+  out prominently in the report.
 - A bare number (e.g. `/merge 12`) → operate on that PR alone, ignoring stack
   detection. If its head branch is not checked out, `gh pr checkout 12` first (which
   requires a clean tree per step 2).
@@ -314,9 +380,11 @@ ask), not as a flag to pass through to `gh`.
 - **Verify everything, then merge everything.** Steps 3–7 mutate nothing but the
   remote refs of branches that were already meant to be pushed. Keep it that way: no
   merging until the entire stack is green.
-- Never `--admin`, `--force`, `--force-with-lease`, or `-D`. Never resolve conflicts,
-  and never `git merge` into `main` locally as a workaround for a blocked PR — the PR
-  *is* the gate.
+- Never `--admin`, `--force`, or `--force-with-lease`. Never resolve conflicts, and
+  never `git merge` into `main` locally as a workaround for a blocked PR — the PR
+  *is* the gate. `git branch -D` is permitted in exactly one place: step 9, after
+  GitHub has reported the PR `MERGED`, because the default squash makes `-d`'s
+  reachability test unable to see the work as landed. Nowhere else.
 - Never push `main` directly; it advances only through the merges in step 8 and the
   fast-forwards in 8d/9. This matches the `push` skill, which refuses `main`.
 - This skill does not rebase. If a PR is behind, conflicting, or the remote stack has

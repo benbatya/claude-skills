@@ -1,6 +1,6 @@
 ---
 name: change
-description: Start a fresh change from the latest main. Switch to main, fast-forward it to the upstream remote, create a new branch named YYMMDD_<description> derived from the request, then begin the work (propose a plan or author code) from the prompt that followed the invocation. Use when the user says "/change ...", "start a new change", "begin new work", or wants to kick off a task on a clean branch off main.
+description: Start a fresh change from the latest main. Switch to main, fast-forward it to the upstream remote, create a new branch named YYMMDD_<description> derived from the request, seed a plans/<branch_name>.md capturing the intended change, then begin the work (propose a plan or author code) from the prompt that followed the invocation. Use when the user says "/change ...", "start a new change", "begin new work", or wants to kick off a task on a clean branch off main.
 ---
 
 # Start a new change on a fresh branch off the latest main
@@ -77,10 +77,33 @@ the final step.
    distinguishing word or a numeric suffix) so the name is unique — never
    overwrite or `-f` an existing branch.
 
-7. Confirm the setup briefly: the remote used, `main`'s new position, and the
-   new branch name.
+7. **Seed the branch's plan file**, `plans/<branch_name>.md` (create `plans/` if the
+   repo has no such directory; a `/` in the branch name nests a subdirectory).
 
-8. **Begin the work.** Now act on the change prompt that followed `/change`:
+   At this point the file is a statement of *intent* — the work has not started.
+   Write it from the change prompt: what is being asked for, the approach as
+   currently understood, anything deliberately out of scope, and any open question
+   whose answer would change the design. Keep it short; it is a starting point, not
+   a specification. `/push` fills in what actually happened as the branch develops,
+   and `/merge` refuses to land a branch without it.
+
+   Commit it immediately, alone:
+   ```bash
+   git add plans/<branch_name>.md
+   git commit -m "plans: start <branch_name>"   # plus this environment's trailer
+   ```
+   Committing now rather than leaving it in the working tree keeps the tree clean
+   (this skill's own step 2 refuses to run on a dirty one), and gives the branch a
+   non-empty commit range from the outset. The noise is temporary — `/merge`
+   squashes the branch to a single commit on `main`.
+
+   If the change prompt was too thin to say anything useful, write the prompt itself
+   and an explicit "approach not yet decided" rather than inventing a design.
+
+8. Confirm the setup briefly: the remote used, `main`'s new position, the new branch
+   name, and the plan file created.
+
+9. **Begin the work.** Now act on the change prompt that followed `/change`:
    - For a non-trivial or ambiguous change, propose a plan first and check it
      with the user before writing code.
    - For a small, well-specified change, author the code directly.
@@ -93,7 +116,8 @@ the final step.
 - Never force-push, `git reset --hard`, `git checkout -- .`, auto-stash, or
   discard uncommitted work.
 - Never force the fast-forward: if `main` has diverged, stop and report.
-- This skill does **not** commit, push, or open a PR — it only prepares the
+- This skill commits exactly one thing: the seed plan file in step 7. It does not
+  commit your code, push, or open a PR — it only prepares the
   branch and starts the work. Committing/pushing are separate, explicit actions.
 - Branch names use underscores throughout (`YYMMDD_snake_case`), matching the
   requested format.
