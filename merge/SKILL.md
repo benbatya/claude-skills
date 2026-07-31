@@ -1,6 +1,6 @@
 ---
 name: merge
-description: Land the current branch — or a whole stack of branches, bottom-up. Verify every branch is pushed and in sync with origin and that the local stack matches the upstream stack, find or create each branch's GitHub PR, verify each branch already has a plans/<branch>.md recording its changes and decisions (written by /change and /push, never by this skill), run the repo's validation/acceptance checks plus each PR's CI, then squash-merge bottom-up (one commit per PR on main), retargeting each PR as its parent lands. Use when the user says "/merge", "merge this branch", "land this PR", "merge the stack", or "ship it".
+description: Land the current branch — or a whole stack of branches, bottom-up. Verify every branch is pushed and in sync with origin and that the local stack matches the upstream stack, find or create each branch's GitHub PR, verify each branch already has a plans/<branch>.md recording its changes and decisions (written by /change and /push, never by this skill), run the repo's validation/acceptance checks plus each PR's CI, then squash-merge bottom-up (one commit per PR on main), retargeting each stacked PR to main *before* its parent lands (afterwards is too late — GitHub permanently closes a PR whose base branch is deleted). Use when the user says "/merge", "merge this branch", "land this PR", "merge the stack", or "ship it".
 ---
 
 # Merge the current branch, or a stack, via GitHub PRs
@@ -12,7 +12,10 @@ repo's own checks, **and** the PR's CI), then merge and tidy up.
 If the branch is part of a **stack** (a chain of local branches each built on the one
 below it), all of that applies to **every branch in the stack**, bottom-up: each one
 is verified, each one gets a PR based on its stack parent, each one is validated, and
-they land in ancestry order with each PR retargeted to `main` as its parent merges.
+they land in ancestry order — with each stacked PR retargeted to `main` **before** its
+parent merges, never after. Merging a parent with `--delete-branch` deletes the base
+branch of the PR above it, and GitHub permanently closes any PR whose base disappears.
+See 8a.
 
 The text following the `/merge` invocation, if any, is an **option string** — see
 "Options" at the end. A bare `/merge` uses the defaults.
@@ -124,16 +127,31 @@ deep is caught while the tree is still untouched.
    gh pr view <B> --json number,title,url,state,isDraft,baseRefName,mergeable,mergeStateStatus,headRefOid
    ```
    - **A PR exists** → use it, after three checks:
-     - `state` is `MERGED` or `CLOSED` → **stop and report** (already landed, or the
-       user closed it deliberately).
+     - `state` is `MERGED` → **stop and report**; it already landed.
+     - `state` is `CLOSED` → **stop and report**, and say *which* kind of closed it is,
+       because the remedies differ. Either the user closed it deliberately, or **GitHub
+       closed it because its base branch was deleted** — the failure 8a exists to
+       prevent. Check with `gh pr view <n> --json baseRefName` and
+       `git ls-remote --heads origin <base>`: a base branch that no longer exists is
+       the tell. That PR is unrecoverable (it can be neither reopened nor retargeted),
+       so the only way forward is a **new** PR for the same branch, created against the
+       current `main` per the "No PR" case below. The commits are safe on the branch;
+       it is the PR that is lost.
      - `headRefOid` != `git rev-parse <B>` → the PR does not point at the commit you
        just verified. **Stop and report.**
-     - `baseRefName` != `P` → the PR base does not match the local stack. This is the
-       most common way a stack goes wrong: PR #2 based on `main` instead of on branch
-       #1 shows a diff containing #1's changes and merges both at once. **Stop and
-       report** the mismatch; retarget it with
+     - `baseRefName` != `P` → usually the PR base does not match the local stack. This
+       is the most common way a stack goes wrong: PR #2 based on `main` instead of on
+       branch #1 shows a diff containing #1's changes and merges both at once. **Stop
+       and report** the mismatch; retarget it with
        `gh pr edit <number> --base <P>` only if the user confirms that is the
        intended shape.
+
+       **One exception, and it is this skill's own doing:** `baseRefName == main` when
+       `P` is a branch that has *already landed and been deleted*. That is 8a working
+       as intended on a previous round — the PR was retargeted to `main` before its
+       parent merged, precisely so the deletion could not close it. Confirm `P` is gone
+       (`git ls-remote --heads origin <P>` returns nothing) and that `main` contains its
+       work, then treat `main` as the correct base and carry on. Do not "fix" it back.
 
      If `isDraft` is true, mark it ready: `gh pr ready <number>`.
    - **No PR** → create one against the stack parent:
@@ -220,15 +238,44 @@ deep is caught while the tree is still untouched.
    and a PR has none (or has a `CHANGES_REQUESTED` review), **stop and report**; do
    not try to merge and let the API reject it.
 
-8. **Merge bottom-up, retargeting as you go.** Only now does anything become
-   irreversible. For each branch `B` in the stack, in ancestry order:
+8. **Merge bottom-up, retargeting one step *ahead* of yourself.** Only now does
+   anything become irreversible. For each branch `B` in the stack, in ancestry order:
 
-   **8a — Retarget.** If `B` is not the bottom-most, its PR is still based on a branch
-   that has now been merged and deleted. GitHub retargets such PRs automatically, but
-   it is asynchronous and not guaranteed, so do it explicitly and verify:
+   **8a — Retarget the PR *above* `B` to `main`, before `B` merges.** This ordering is
+   the whole point of the step, and getting it backwards destroys a PR.
+
+   If a branch sits above `B` in the stack, its PR is based on `B`. Merging `B` with
+   `--delete-branch` deletes that base, and **GitHub responds by closing the dependent
+   PR — permanently.** A closed PR whose base branch no longer exists can be neither
+   reopened nor retargeted; both calls are refused outright:
+
+   ```
+   GraphQL: Cannot change the base branch of a closed pull request. (updatePullRequest)
+   GraphQL: Could not open the pull request. (reopenPullRequest)
+   ```
+
+   The branch and its commits survive, but the PR is gone for good — its review history,
+   its number, and any discussion on it — and the work needs an entirely new PR. Retarget
+   *first* and the deletion is harmless, because `main` is never deleted:
+
+   ```bash
+   gh pr edit <number-of-the-PR-above-B> --base main    # BEFORE merging B
+   ```
+
+   Do this even though the retargeted PR's diff will temporarily show `B`'s changes too:
+   that is cosmetic and resolves the moment `B` lands, whereas the closure is not
+   recoverable.
+
+   Then handle `B` itself. If `B`'s own PR is still based on a branch merged in an
+   earlier round, it needs the same treatment — GitHub does retarget such PRs
+   automatically, but only when it did not close them first, and the behaviour is
+   asynchronous and not guaranteed. So set it explicitly and verify:
    ```bash
    gh pr edit <number> --base main
    ```
+   If `B`'s PR is already `CLOSED` because a previous round deleted its base, **stop and
+   report**: it cannot be revived, and a replacement PR must be created (step 6) against
+   the current `main` before this branch can land.
 
    **8b — Confirm mergeability and head.** GitHub recomputes mergeability after a
    retarget, so the value captured in step 6 is stale. Re-read it, and re-confirm
@@ -380,6 +427,12 @@ ask), not as a flag to pass through to `gh`.
 - **Verify everything, then merge everything.** Steps 3–7 mutate nothing but the
   remote refs of branches that were already meant to be pushed. Keep it that way: no
   merging until the entire stack is green.
+- **Deleting a branch destroys the PRs based on it.** `--delete-branch` on a stack
+  parent closes the PR above it, and that closure is permanent — GitHub refuses both
+  `reopenPullRequest` and `updatePullRequest` once the base is gone, so the review
+  history and the PR number are unrecoverable even though the commits are not. This is
+  the one irreversible side effect in the skill that is *not* a merge, and 8a's
+  retarget-first ordering is the only thing preventing it.
 - Never `--admin`, `--force`, or `--force-with-lease`. Never resolve conflicts, and
   never `git merge` into `main` locally as a workaround for a blocked PR — the PR
   *is* the gate. `git branch -D` is permitted in exactly one place: step 9, after

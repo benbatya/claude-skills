@@ -1,6 +1,6 @@
 ---
 name: rebase
-description: Fast-forward local main to the latest remote, then rebase the current branch (and any branches stacked with it) on top of it, in stacked order. Use when the user asks to "update main and rebase", "sync main and rebase my branch", or "rebase onto latest main".
+description: Fast-forward local main to the latest remote, then rebase the current branch (and any branches stacked with it) on top of it, in stacked order — using `--onto` to skip commits whose parent branch already landed by squash merge, which would otherwise conflict on the first commit. Use when the user asks to "update main and rebase", "sync main and rebase my branch", or "rebase onto latest main".
 ---
 
 # Fast-forward main, then rebase the current branch (stack-aware)
@@ -67,6 +67,47 @@ stack in order so the stack stays intact.
 
 6. **Rebase the stack in order.**
 
+   **First, check what `main` did to the branch below.** If the branch this stack was
+   built on has already landed by **squash** or **rebase** merge, `main` holds its
+   *changes* but not its *commits* — the merge wrote a new, different commit. A plain
+   `git rebase main` then replays those already-landed commits onto a `main` that
+   already contains their content, and conflicts on the first file both sides touch.
+   Those are genuine conflicts with nothing useful to resolve: the commits should not
+   be replayed at all. Resolving them by hand duplicates the parent's work, and
+   `--skip`-ing through them one at a time is the same fix done the slow way.
+
+   Detect it before starting. The tell is commits you know have landed still showing up
+   as "not in main":
+   ```bash
+   git log --oneline main..<top-of-stack>     # lists the parent's commits => squashed
+   ```
+   Confirm with `git merge-base --is-ancestor <old-parent-tip> main` — it **fails** when
+   the parent was squash- or rebase-merged, and succeeds after an ordinary merge commit.
+
+   When it applies, replay only what is genuinely new by naming the **old parent tip**
+   as the upstream, instead of rebasing onto `main` wholesale:
+   ```bash
+   git rebase --update-refs --onto main <old-parent-tip> <top-of-stack>
+   ```
+   Everything up to and including `<old-parent-tip>` is skipped, only the commits above
+   it are replayed, and `--update-refs` still moves the intermediate refs. Use this in
+   place of 6a; for a forked stack apply the same `--onto main <old-parent-tip>` form to
+   the lowest surviving branch, then continue with 6b for the rest.
+
+   **Finding `<old-parent-tip>` after the branch is gone** — `gh pr merge
+   --delete-branch` removes it locally and remotely, but the commit is still reachable:
+   ```bash
+   gh pr view <parent-PR> --json headRefOid -q .headRefOid   # exact, survives deletion
+   git reflog show <deleted-branch>                          # if the ref was local
+   git fetch origin refs/pull/<parent-PR>/head               # GitHub keeps it on the PR
+   ```
+
+   Afterwards, confirm the parent's work was not duplicated — the range should contain
+   this branch's own commits and nothing else:
+   ```bash
+   git log --oneline main..<B>
+   ```
+
    **6a — Linear stack (preferred, uses `git rebase --update-refs`).** Most
    stacks are linear: each branch's tip is an ancestor of the next, so the
    topmost branch's history contains every lower branch tip. In that case one
@@ -129,3 +170,9 @@ stack in order so the stack stays intact.
 - Prefer `--update-refs` (6a) for linear stacks — it is atomic per rebase and
   keeps every intermediate ref consistent. Only fall back to the per-branch
   `--onto` walk (6b) when the stack forks into multiple leaves.
+- **A squash-merged parent is the common reason a rebase conflicts on its first
+  commit.** `main` has the parent's changes under a different commit, so replaying the
+  parent's own commits collides with them. The conflict is a signal to change the
+  command, not to resolve anything: rebase `--onto main <old-parent-tip>` instead (see
+  the preamble to step 6). Landing a stack one PR at a time means hitting this once per
+  round, so expect it rather than re-diagnosing it each time.
